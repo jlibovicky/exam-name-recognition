@@ -25,7 +25,7 @@ def find_aruco_markers(img):
     parameters = cv2.aruco.DetectorParameters()
     marker_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     detector = cv2.aruco.ArucoDetector(marker_dict, parameters)
-    corners, ids, rejected = detector.detectMarkers(img)
+    corners, ids, _ = detector.detectMarkers(img)
     assert len(corners) == len(ids) == 3
     sorted_corners = sort_corners(corners, ids)
     non_zero_id = next(idx[0] for idx in ids if idx != [0])
@@ -49,11 +49,17 @@ LINE_X = 344
 LINE_1_Y = 313
 LINE_2_Y = 394
 
+
 def highlight_charboxes(img):
     for i in range(28):
         start_x = LINE_X + i * (CHARBOX_W + 4) + (i // 3)
-        cv2.rectangle(img, (start_x, LINE_1_Y), (start_x + CHARBOX_W, LINE_1_Y + CHARBOX_H), (0, 0, 255), 2)
-        cv2.rectangle(img, (start_x, LINE_2_Y), (start_x + CHARBOX_W, LINE_2_Y + CHARBOX_H), (0, 0, 255), 2)
+        cv2.rectangle(img, (start_x, LINE_1_Y),
+                      (start_x + CHARBOX_W, LINE_1_Y + CHARBOX_H),
+                      (0, 0, 255), 2)
+        cv2.rectangle(img, (start_x, LINE_2_Y),
+                      (start_x + CHARBOX_W, LINE_2_Y + CHARBOX_H),
+                      (0, 0, 255), 2)
+
 
 def extract_charboxes(img):
     first_name = []
@@ -137,8 +143,8 @@ def norm_name(name):
 
 def load_student_list(student_list_path):
     names = []
-    with open(student_list_path) as f:
-        for line in f:
+    with open(student_list_path, encoding="utf-8") as f_list:
+        for line in f_list:
             name = line.strip()
             # Remove everything after comma (titles)
             name = name.split(",")[0]
@@ -147,7 +153,6 @@ def load_student_list(student_list_path):
             if "CH" in name.upper():
                 names[-1][1].append(
                     norm_name(name.upper().replace("CH", "H")))
-
     return names
 
 
@@ -156,12 +161,21 @@ def to_base64(img):
     return base64.b64encode(buffer).decode("ascii")
 
 
+def img_to_array(img):
+    return np.array(img).astype(np.uint8).reshape(-1).tolist()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("reference_pdf", help="Reference PDF file.")
     parser.add_argument("scanned_pdf", help="Scanned PDF file.")
     parser.add_argument("student_list", help="Student list, name per line.")
-    parser.add_argument("--ocr-model", default="shufflenet.pt", help="OCR model path.")
+    parser.add_argument(
+        "--ocr-model", default="shufflenet.pt", help="OCR model path.")
+    parser.add_argument(
+        "--html-report", default="report.html", help="Path to HTML report.")
+    parser.add_argument(
+        "--character-csv", default="characters.csv", help="Path to CSV file.")
     args = parser.parse_args()
 
     logging.info("Loading OCR model.")
@@ -191,6 +205,8 @@ def main():
     student_signiture_matching = []
     first_name_imgs = []
     surname_imgs = []
+    first_character_imgs = []
+    surname_character_imgs = []
 
     logging.info("Processing pages.")
     failed_pages = 0
@@ -220,6 +236,9 @@ def main():
         first_name_imgs.append(np.concatenate(first_name_boxes, axis=1))
         surname_imgs.append(np.concatenate(surname_boxes, axis=1))
 
+        first_character_imgs.append(first_name_boxes)
+        surname_character_imgs.append(surname_boxes)
+
         first_name_log_probs, surname_log_probs = classifier.classify(
             first_name_boxes, surname_boxes)
         student_signiture_matching.append(
@@ -227,26 +246,48 @@ def main():
                 first_name_log_probs, surname_log_probs, student_list))
 
     if failed_pages > 0:
-        logging.warning("Failed to process %d pages of %d.", failed_pages, len(scanned))
+        logging.warning(
+            "Failed to process %d pages of %d.",
+            failed_pages, len(scanned_ppm))
 
-    img_ids, student_ids = linear_sum_assignment(student_signiture_matching, maximize=True)
+    logging.info("Matching students to signitures.")
+    img_ids, student_ids = linear_sum_assignment(
+        student_signiture_matching, maximize=True)
 
-    with open("report.html", "w") as f:
-        print("<html><head><meta charset='utf-8'></head><body>", file=f)
-        print("<table>", file=f)
+    logging.info("Generating HTML report.")
+    with open(args.html_report, "w") as f_html:
+        print("<html><head><meta charset='utf-8'></head><body>", file=f_html)
+        print("<table>", file=f_html)
 
         for img_id, student_id in zip(img_ids, student_ids):
-            print("<tr>", file=f)
-            print(f"<td>{student_list[student_id][0]}</td>", file=f)
-            print(f"<td><img src='data:image/png;base64,{to_base64(surname_imgs[img_id])}'/><br />", file=f)
-            print(f"<img src='data:image/png;base64,{to_base64(first_name_imgs[img_id])}'/></td>", file=f)
-            print("</tr>", file=f)
+            print("<tr>", file=f_html)
+            print(f"<td>{student_list[student_id][0]}</td>", file=f_html)
+            print(f"<td><img src='data:image/png;base64,{to_base64(surname_imgs[img_id])}'/><br />", file=f_html)
+            print(f"<img src='data:image/png;base64,{to_base64(first_name_imgs[img_id])}'/></td>", file=f_html)
+            print("</tr>", file=f_html)
 
-        print("</table>", file=f)
-        print("</body></html>", file=f)
+        print("</table>", file=f_html)
+        print("</body></html>", file=f_html)
 
+    logging.info("Character images as CSV.")
+    with open(args.character_csv, "w") as f_csv:
+        for img_id, student_id in zip(img_ids, student_ids):
+            surname, first_name = student_list[student_id][0].split(" ", 1)
+            surname += " "
+            first_name += " "
+
+            for surname_char, img in zip(
+                    surname, surname_character_imgs[img_id]):
+                img_list = img_to_array(img)
+                img_line = ",".join(map(str, img_list))
+                print(f"{surname_char},{img_line}", file=f_csv)
+
+    # Print the matched students
     for student_id in student_ids:
         print(student_list[student_id][0])
+
+    logging.info("Done.")
+
 
 if  __name__ == "__main__":
     main()
